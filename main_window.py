@@ -276,10 +276,8 @@ class MainWindow(QMainWindow):
         code = decode_copy_url(url.toString())
         if code is None:
             return
-        # 保存点击前的滚动位置，复制后恢复，避免视图跳到顶部
-        old_scroll = self.chat_view.scrollbar_position()
-        QGuiApplication.clipboard().setText(code)
-        self.chat_view.set_scrollbar_position(old_scroll)
+        # 先把滚动交给 widget 内部做两段恢复（立即 + 下一帧），彻底避免跳顶
+        self.chat_view.copy_and_restore(code)
         self.statusBar().showMessage("代码已复制到剪贴板", 2000)
 
     # ---------- 文件加载 ----------

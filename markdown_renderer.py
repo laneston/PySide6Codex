@@ -1,4 +1,5 @@
 import base64
+import re
 
 import markdown
 
@@ -63,31 +64,45 @@ def _unhtml_escape(text: str) -> str:
 
 
 def _make_copy_anchor(code_text: str) -> str:
-    """将代码文本编码为 copy:// 锚点，供 QTextBrowser 点击复制。"""
-    encoded = base64.b64encode(code_text.encode("utf-8")).decode("ascii")
-    return f'<a href="copy://{encoded}" style="color:#0366d6;">📋 复制</a>'
+    """将代码文本编码为 #copy: 锚点，供 QTextBrowser 点击复制。
+
+    说明：
+      - 使用 fragment (#) 形式而非 copy://xxx：QTextBrowser 对找不到的 fragment
+        不会触发 scrollToAnchor 回退，从而保持滚动位置不跳顶。
+      - 使用 urlsafe base64（- 和 _ 替代 + /）并去掉尾部 =：避免 QUrl 对
+        base64 中的 + / = 做规范化，导致解码失败。
+    """
+    encoded = (
+        base64.urlsafe_b64encode(code_text.encode("utf-8")).decode("ascii").rstrip("=")
+    )
+    return f'<a href="#copy:{encoded}" style="color:#0366d6;">📋 复制</a>'
+
+
+# 精确匹配 markdown 的 fenced_code 生成的块级代码结构：
+#   <pre><code class="language-xxx">...</code></pre>
+# 使用 [^>]* 兼容可能出现的 class 属性；
+# 使用 .*? 非贪婪，代码块内若被转义过的字面 </code></pre> 不参与匹配。
+_CODE_BLOCK_RE = re.compile(
+    r"<pre><code[^>]*>(?P<code>.*?)</code></pre>",
+    re.DOTALL,
+)
 
 
 def _inject_copy_anchors(html: str) -> str:
-    """在每个 </code></pre> 之后插入复制锚点。"""
-    result_parts: list[str] = []
-    remaining = html
-    close_tag = "</code></pre>"
-    while close_tag in remaining:
-        idx = remaining.find(close_tag)
-        code_open = remaining.rfind("<code>", 0, idx)
-        if code_open == -1:
-            result_parts.append(remaining[: idx + len(close_tag)])
-            remaining = remaining[idx + len(close_tag) :]
-            continue
-        code_text = remaining[code_open + len("<code>") : idx]
-        code_text = _unhtml_escape(code_text)
-        anchor = _make_copy_anchor(code_text)
-        result_parts.append(remaining[: idx + len(close_tag)] + f"<p>{anchor}</p>")
-        remaining = remaining[idx + len(close_tag) :]
+    """在每个 <pre><code>...</code></pre> 之后插入复制锚点。
 
-    result_parts.append(remaining)
-    return "".join(result_parts)
+    旧实现使用 ``rfind("<code>")`` 定位代码起点，在当前 HTML 里前面出现
+    行内代码（如标题中的 `xxx`）时，会错误地把行内 <code> 当作块级代码
+    起点，导致复制内容混入前置 HTML 片段（例如 "</code>）</h3>"）。
+    改用正则整段匹配 <pre><code>...</code></pre>，边界只来自完整代码块。
+    """
+
+    def _replace(match: "re.Match[str]") -> str:
+        code_text = _unhtml_escape(match.group("code"))
+        anchor = _make_copy_anchor(code_text)
+        return f"{match.group(0)}<p>{anchor}</p>"
+
+    return _CODE_BLOCK_RE.sub(_replace, html)
 
 
 def render_markdown_body(markdown_text: str) -> str:
@@ -107,11 +122,22 @@ def render_markdown_to_html(markdown_text: str) -> str:
 
 
 def decode_copy_url(url: str) -> str | None:
-    """从 copy:// 锚点中解出原始代码文本。非 copy 协议返回 None。"""
-    if not url.startswith("copy://"):
+    """从 #copy: 锚点解出原始代码文本。非 copy 协议返回 None。
+
+    兼容旧 copy:// 格式以防缓存/历史脏数据，但优先使用 #copy: 格式。
+    """
+    payload = None
+    if url.startswith("#copy:"):
+        payload = url[len("#copy:") :]
+    elif url.startswith("copy://"):
+        # 兼容旧格式（若某些环境下仍有残留）
+        payload = url[len("copy://") :]
+    if payload is None:
         return None
-    b64 = url[len("copy://") :]
+
+    # urlsafe base64 兼容处理（补 = 到 4 的倍数）
+    padding = (-len(payload)) % 4
     try:
-        return base64.b64decode(b64).decode("utf-8")
+        return base64.urlsafe_b64decode(payload + ("=" * padding)).decode("utf-8")
     except Exception:
         return None
