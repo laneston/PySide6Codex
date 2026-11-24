@@ -3,6 +3,7 @@ from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QTextBrowser, QTextEdit, QAbstractScrollArea
 
 from markdown_renderer import render_markdown_to_html
+from PySide6.QtCore import QTimer, Signal
 
 
 class MarkdownChatView(QTextBrowser):
@@ -56,13 +57,56 @@ class MarkdownChatView(QTextBrowser):
 
 
 class PlainPasteTextEdit(QTextEdit):
-    """只粘贴纯文本的 QTextEdit。
+    """只粘贴纯文本、且支持拖拽文件到输入框的 QTextEdit。
 
-    默认 QTextEdit 粘贴时会保留源格式（字号、颜色、字体等），
-    从浏览器或 Word 复制内容后会把样式一并带入输入框。
-    重写 insertFromMimeData 强制走 insertPlainText，只保留纯文本。
+    默认 QTextEdit：
+      - 粘贴时会保留源格式，需重写 insertFromMimeData 强制纯文本；
+      - 拖入文件时把路径当文本插入（或嵌入图片），不会触发附件上传逻辑。
+    这里额外接管拖拽事件，把本地文件 URL 通过 files_dropped 信号抛给上层。
     """
 
+    files_dropped = Signal(list)  # 发出本地文件绝对路径列表
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    # ---------- 工具：从拖拽事件中提取本地文件路径 ----------
+    @staticmethod
+    def _local_paths_from_event(event) -> list[str] | None:
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return None
+        paths: list[str] = []
+        for url in mime.urls():
+            if url.isLocalFile():
+                p = url.toLocalFile()
+                if p:
+                    paths.append(p)
+        return paths or None
+
+    # ---------- 拖拽事件 ----------
+    def dragEnterEvent(self, event):  # noqa: N802
+        if self._local_paths_from_event(event) is not None:
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):  # noqa: N802
+        if self._local_paths_from_event(event) is not None:
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):  # noqa: N802
+        paths = self._local_paths_from_event(event)
+        if paths:
+            event.acceptProposedAction()
+            self.files_dropped.emit(paths)
+        else:
+            super().dropEvent(event)
+
+    # ---------- 粘贴只保留纯文本 ----------
     def insertFromMimeData(self, source):  # noqa: N802 (Qt 命名风格)
         if source.hasText():
             self.insertPlainText(source.text())

@@ -46,7 +46,7 @@ client = OpenAI(api_key=API_KEY, base_url="https://api.deepseek.com", timeout=30
 
 MODEL_TEXT = "deepseek-chat"
 MODEL_VISION = "deepseek-flash"
-MAX_TOKENS = 8192
+MAX_TOKENS = 32768
 IMAGE_INLINE_SAFE_BYTES = 20 * 1024 * 1024
 
 TEXT_EXTENSIONS = {
@@ -228,6 +228,7 @@ class MainWindow(QMainWindow):
             "QTextEdit { background: #ffffff; border: 1px solid #d0d7de; "
             "border-radius: 6px; padding: 6px; font-size: 13px; }"
         )
+        self.input_box.files_dropped.connect(self._attach_paths)  # 新增
         bottom.addWidget(self.input_box, stretch=1)
 
         # 按钮竖排（右下角同一列）
@@ -304,6 +305,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("代码已复制到剪贴板", 2000)
 
     # ---------- 文件加载 ----------
+    # ---------- 文件加载 ----------
     def attach_file(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -312,8 +314,18 @@ class MainWindow(QMainWindow):
             "代码/文本 (*.c *.cpp *.h *.hpp *.json *.txt *.md *.py *.csv);;"
             "图片 (*.jpg *.jpeg *.png *.gif *.webp);;所有文件 (*)",
         )
+        self._attach_paths(paths or [])
+
+    def _attach_paths(self, paths):
+        """统一入口：按钮选择与拖拽落点都走这里。"""
+        if self.generating:
+            # 生成中禁止追加附件，与按钮禁用保持一致
+            return
         for path in paths or []:
             p = Path(path)
+            if p.is_dir():
+                QMessageBox.warning(self, "不支持", f"暂不支持目录：{p.name}")
+                continue
             ext = p.suffix.lower()
             if ext in IMAGE_EXTENSIONS:
                 self._load_image(p)
@@ -326,12 +338,24 @@ class MainWindow(QMainWindow):
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            text = path.read_text(encoding="gbk", errors="ignore")
+            try:
+                text = path.read_text(encoding="gbk", errors="ignore")
+            except OSError as e:
+                QMessageBox.warning(self, "读取失败", f"无法读取 {path.name}：{e}")
+                return
+        except OSError as e:
+            QMessageBox.warning(self, "读取失败", f"无法读取 {path.name}：{e}")
+            return
         self.uploaded_files.append({"type": "text", "name": path.name, "content": text})
         self.file_list.addItem(f"[文本] {path.name}")
 
     def _load_image(self, path: Path):
-        if path.stat().st_size > IMAGE_INLINE_SAFE_BYTES:
+        try:
+            size = path.stat().st_size
+        except OSError as e:
+            QMessageBox.warning(self, "读取失败", f"无法读取 {path.name}：{e}")
+            return
+        if size > IMAGE_INLINE_SAFE_BYTES:
             QMessageBox.warning(self, "图片过大", f"{path.name} 超过 20 MB 上限")
             return
         try:
@@ -445,6 +469,11 @@ class MainWindow(QMainWindow):
 
         # ---- 读取思考强度配置 ----
         effort, thinking_enabled = self.effort_combo.currentData()
+        if thinking_enabled and effort in ("high", "max"):
+            effective_max_tokens = 32768
+        else:
+            effective_max_tokens = 8192
+
         reasoning_effort = effort if thinking_enabled else "low"
 
         self.chat_view.append(f"\n🧑 你：{user_text}\n")
@@ -459,14 +488,16 @@ class MainWindow(QMainWindow):
         self._streaming_start_pos = self.chat_view.textCursor().position()
 
         self._set_generating(True)
+
         self.worker = StreamWorker(
             client,
             api_messages,
             model,
-            MAX_TOKENS,
+            effective_max_tokens,  # 替换原来的 MAX_TOKENS
             reasoning_effort=reasoning_effort,
             thinking_enabled=thinking_enabled,
         )
+
         self.worker.chunk_received.connect(self.on_chunk)
         self.worker.reasoning_chunk.connect(self.on_reasoning_chunk)  # 新增
         self.worker.finished.connect(self.on_finished)
@@ -520,6 +551,10 @@ class MainWindow(QMainWindow):
         self._flush_timer.stop()
 
         reply = self.current_reply.strip()
+        if not reply and self._reasoning_text.strip():
+            # 兜底：content 为空但 reasoning_content 有内容时，将思考内容作为回答
+            reply = self._reasoning_text.strip()
+
         if reply:
             self.messages.append({"role": "assistant", "content": reply})
         else:
