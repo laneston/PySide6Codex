@@ -32,6 +32,8 @@ from chat_store import (
 )
 from chat_widgets import MarkdownChatView, PlainPasteTextEdit
 from markdown_renderer import decode_copy_url, render_markdown_body
+from PySide6.QtGui import QTextCharFormat, QColor
+from PySide6.QtWidgets import QComboBox
 
 # ---- 配置 ----
 load_dotenv()
@@ -136,17 +138,18 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     # ==================== UI 构建 ====================
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
 
-        # 顶层布局：上方内容区（stretch=1）+ 底部固定栏
         root = QVBoxLayout(central)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        # ---------- 顶部工具条（切换会话） ----------
+        # ---------- 顶部工具条 ----------
         top_bar = QHBoxLayout()
+
         self.switch_btn = QPushButton("🔙 切换会话")
         self.switch_btn.setStyleSheet(
             "QPushButton { padding: 6px 14px; border: 1px solid #d0d7de; "
@@ -155,6 +158,26 @@ class MainWindow(QMainWindow):
         )
         self.switch_btn.clicked.connect(self._on_switch_session)
         top_bar.addWidget(self.switch_btn)
+
+        # ---- 新增：思考强度选择器 ----
+        effort_label = QLabel("思考强度：")
+        effort_label.setStyleSheet("font-size: 13px; color: #555;")
+        top_bar.addWidget(effort_label)
+
+        self.effort_combo = QComboBox()
+        # (显示文本, reasoning_effort, thinking_enabled)
+        self.effort_combo.addItem("关闭", ("", False))
+        self.effort_combo.addItem("低", ("low", True))
+        self.effort_combo.addItem("中", ("medium", True))
+        self.effort_combo.addItem("高（默认）", ("high", True))
+        self.effort_combo.addItem("最高", ("max", True))
+        self.effort_combo.setCurrentIndex(3)  # 默认「高」
+        self.effort_combo.setStyleSheet(
+            "QComboBox { padding: 4px 8px; border: 1px solid #d0d7de; "
+            "border-radius: 6px; background: #ffffff; font-size: 13px; }"
+        )
+        top_bar.addWidget(self.effort_combo)
+
         top_bar.addStretch(1)
 
         self.session_label = QLabel(f"当前会话：{self.session_name}")
@@ -162,7 +185,7 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.session_label)
         root.addLayout(top_bar)
 
-        # ---------- 中部内容区（左聊天 / 右附件） ----------
+        # ---------- 中部内容区（不变）----------
         splitter = QSplitter(Qt.Horizontal)
 
         # ---- 左侧（聊天视图） ----
@@ -395,6 +418,7 @@ class MainWindow(QMainWindow):
         self.pending_user_text = user_text
         self.current_reply = ""
         self._pending_text = ""
+        self._reasoning_text = ""  # 新增：本轮思维链缓存
 
         text_parts: list[str] = []
         image_items: list[dict] = []
@@ -419,15 +443,32 @@ class MainWindow(QMainWindow):
         api_messages, has_image = self._build_api_messages()
         model = MODEL_VISION if has_image else MODEL_TEXT
 
+        # ---- 读取思考强度配置 ----
+        effort, thinking_enabled = self.effort_combo.currentData()
+        reasoning_effort = effort if thinking_enabled else "low"
+
         self.chat_view.append(f"\n🧑 你：{user_text}\n")
         for img in image_items:
             self.chat_view.append(f"[图片：{img['name']}]\n")
-        self.chat_view.append("🤖 DeepSeek：")
+
+        if thinking_enabled:
+            self.chat_view.append("🤖 DeepSeek（思考中…）：")
+        else:
+            self.chat_view.append("🤖 DeepSeek：")
+
         self._streaming_start_pos = self.chat_view.textCursor().position()
 
         self._set_generating(True)
-        self.worker = StreamWorker(client, api_messages, model, MAX_TOKENS)
+        self.worker = StreamWorker(
+            client,
+            api_messages,
+            model,
+            MAX_TOKENS,
+            reasoning_effort=reasoning_effort,
+            thinking_enabled=thinking_enabled,
+        )
         self.worker.chunk_received.connect(self.on_chunk)
+        self.worker.reasoning_chunk.connect(self.on_reasoning_chunk)  # 新增
         self.worker.finished.connect(self.on_finished)
         self.worker.error.connect(self.on_error)
         self.worker.start()
@@ -436,6 +477,7 @@ class MainWindow(QMainWindow):
         self.generating = flag
         for btn in (self.send_btn, self.attach_btn, self.clear_btn, self.switch_btn):
             btn.setEnabled(not flag)
+        self.effort_combo.setEnabled(not flag)
 
     # ==================== 流式显示 ====================
     def on_chunk(self, text):
@@ -443,6 +485,23 @@ class MainWindow(QMainWindow):
         self.current_reply += text
         if not self._flush_timer.isActive():
             self._flush_timer.start()
+
+    def on_reasoning_chunk(self, text: str):
+        """思维链增量：直接插入当前光标位置，用灰色斜体展示。"""
+        if not text:
+            return
+        self._reasoning_text = getattr(self, "_reasoning_text", "") + text
+        cursor = self.chat_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(text, self._reasoning_format())
+        self.chat_view.setTextCursor(cursor)
+        self.chat_view.ensureCursorVisible()
+
+    def _reasoning_format(self):
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor("#888888"))
+        fmt.setFontItalic(True)
+        return fmt
 
     def _flush_chunks(self):
         if not self._pending_text:
@@ -474,6 +533,7 @@ class MainWindow(QMainWindow):
         self.pending_user_text = ""
         self.current_reply = ""
         self._pending_text = ""
+        self._reasoning_text = ""
         self.worker = None
         self._set_generating(False)
 
