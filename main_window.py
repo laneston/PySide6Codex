@@ -34,6 +34,10 @@ from chat_widgets import MarkdownChatView, PlainPasteTextEdit
 from markdown_renderer import decode_copy_url, render_markdown_body
 from PySide6.QtGui import QTextCharFormat, QColor
 from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QComboBox, QCheckBox
+
+
+
 
 # ---- 配置 ----
 load_dotenv()
@@ -159,13 +163,12 @@ class MainWindow(QMainWindow):
         self.switch_btn.clicked.connect(self._on_switch_session)
         top_bar.addWidget(self.switch_btn)
 
-        # ---- 新增：思考强度选择器 ----
+        # ---- 思考强度选择器 ----
         effort_label = QLabel("思考强度：")
         effort_label.setStyleSheet("font-size: 13px; color: #555;")
         top_bar.addWidget(effort_label)
 
-        self.effort_combo = QComboBox()
-        # (显示文本, reasoning_effort, thinking_enabled)
+        self.effort_combo = QComboBox()  # ← 关键：必须有 self. 前缀
         self.effort_combo.addItem("关闭", ("", False))
         self.effort_combo.addItem("低", ("low", True))
         self.effort_combo.addItem("中", ("medium", True))
@@ -177,6 +180,14 @@ class MainWindow(QMainWindow):
             "border-radius: 6px; background: #ffffff; font-size: 13px; }"
         )
         top_bar.addWidget(self.effort_combo)
+
+        # ---- 联网搜索开关（默认关闭）----
+        self.web_search_checkbox = QCheckBox("联网搜索")
+        self.web_search_checkbox.setChecked(False)
+        self.web_search_checkbox.setStyleSheet(
+            "QCheckBox { font-size: 13px; color: #555; padding: 4px 8px; }"
+        )
+        top_bar.addWidget(self.web_search_checkbox)
 
         top_bar.addStretch(1)
 
@@ -465,15 +476,22 @@ class MainWindow(QMainWindow):
             self.messages.append({"role": "user", "content": full_user_text})
 
         api_messages, has_image = self._build_api_messages()
-        model = MODEL_VISION if has_image else MODEL_TEXT
 
-        # ---- 读取思考强度配置 ----
+        # ---- 读取联网搜索开关 ----
+        web_search_enabled = self.web_search_checkbox.isChecked()
+
+        # 联网搜索只支持 deepseek-flash；有图片时也走 deepseek-flash
+        if has_image or web_search_enabled:
+            model = MODEL_VISION  # "deepseek-flash"
+        else:
+            model = MODEL_TEXT  # "deepseek-chat"
+
+        # ---- 思考强度配置 ----
         effort, thinking_enabled = self.effort_combo.currentData()
         if thinking_enabled and effort in ("high", "max"):
             effective_max_tokens = 32768
         else:
             effective_max_tokens = 8192
-
         reasoning_effort = effort if thinking_enabled else "low"
 
         self.chat_view.append(f"\n🧑 你：{user_text}\n")
@@ -493,9 +511,10 @@ class MainWindow(QMainWindow):
             client,
             api_messages,
             model,
-            effective_max_tokens,  # 替换原来的 MAX_TOKENS
+            effective_max_tokens,
             reasoning_effort=reasoning_effort,
             thinking_enabled=thinking_enabled,
+            web_search_enabled=web_search_enabled,  # 新增
         )
 
         self.worker.chunk_received.connect(self.on_chunk)
@@ -509,6 +528,7 @@ class MainWindow(QMainWindow):
         for btn in (self.send_btn, self.attach_btn, self.clear_btn, self.switch_btn):
             btn.setEnabled(not flag)
         self.effort_combo.setEnabled(not flag)
+        self.web_search_checkbox.setEnabled(not flag)  # 新增
 
     # ==================== 流式显示 ====================
     def on_chunk(self, text):

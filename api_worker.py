@@ -16,8 +16,9 @@ class StreamWorker(QObject):
         messages,
         model: str,
         max_tokens: int,
-        reasoning_effort: str = "high",  # 新增：low / high / max
-        thinking_enabled: bool = True,  # 新增：是否开启思考模式
+        reasoning_effort: str = "high",
+        thinking_enabled: bool = True,
+        web_search_enabled: bool = False,  # 新增：联网搜索开关，默认关闭
     ):
         super().__init__()
         self._client = client
@@ -26,6 +27,7 @@ class StreamWorker(QObject):
         self._max_tokens = max_tokens
         self._reasoning_effort = reasoning_effort
         self._thinking_enabled = thinking_enabled
+        self._web_search_enabled = web_search_enabled
         self._cancel_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -47,6 +49,9 @@ class StreamWorker(QObject):
                     }
                 },
             }
+            if self._web_search_enabled:
+                kwargs["tools"] = [{"type": "deepseek_web_search"}]
+
             stream = self._client.chat.completions.create(**kwargs)
             for chunk in stream:
                 if self._cancel_event.is_set():
